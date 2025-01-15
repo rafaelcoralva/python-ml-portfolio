@@ -9,6 +9,7 @@
     # - CD (conduction disturbance) - Conditions affecting the electrical conduction pathways of the heart:
     #                                 bundle branch block, atrioventricular (AV) blocks, intraventricular conduction delays, tachyarhythmia, etc.
     # - HYP (hypertrophy)] - Enlargement or thickening of the heart muscle (particularly the ventricle(s)).
+# Not all of the CVD superclass labels in the dataset were validated by humans: approx. 6,000 of the ECG recordings were not human-validated.
 # The prevalence of coexisting CVD superclasses in individual ECG recordings is significant and reflects the reality of CVDs (i.e., comorbidities).
 # This script loads the PTBXL database (patient demographic, recording, and label information), 
 # as well as the PTBXL+ database (extracted ECG features from the PTBXL database using public ECG analysis libraries).
@@ -46,9 +47,11 @@ from sklearn.decomposition import FastICA
 from sklearn.manifold import TSNE
 
 # % 0.2 Global parameters and flags
-rand_state = 93 # Fixing random state for reproducibility
-flag_combine_shared_feats = False # Flag to combined shared features between PTBXL+ 12L and Uni G featuresets.
-flag_save = True # Flag to save output X and y
+rand_state = 93 # Fixing random state for reproducibility.
+flag_save = True # Flag to save output X and y.
+flag_validated_by_human_only = False # Flag to only consider ECG recordings validated by human. Note, observation comments in this script apply to = False case.
+flag_combine_shared_feats = False # Flag to combined shared features between PTBXL+ 12SL and Uni G featuresets. If False, the shared featues of the default featureset defined below are considered.
+default_ptbxl_plus = '12sl' # The PTBXL+ featureset considered for the shared features if flag_combine_shared_feats is set to False. Options = '12sl' (default) or 'unig'.
 
 
 # %% 1. Loading Datasets
@@ -83,17 +86,30 @@ cvd_labels = y_dic.apply(aggregate_diagnostic)
 # Extract cross-validation stratification fold for future train/val/test splitting
 strat_fold = df_ptbxl['strat_fold'] # Database authors recommend 10-fold train-test splits obtained via author-defined stratified sampling. 
                                     # Respects patient assignment (i.e., all ECG recordings of a particular patient were assigned to the same fold). 
-                                    # ECG recordings in fold 9 and 10 underwent at least one human evaluation and are therefore of a particularly high label quality. 
+                                    # All ECG recordings in fold 9 and 10 underwent at least one human evaluation and are therefore of a particularly high label quality. 
                                     # Database authors therefore propose to use folds 1-8 as training set, fold 9 as validation set and fold 10 as test set.
 
 # Packaging target class output (with stratification fold + raw 500Hz ECG file location)
 y = pd.concat([cvd_labels, strat_fold, df_ptbxl['filename_hr']], axis=1)
 
-# Defining troubleshooting function to extract and plot the raw ECG of an input ECG ID
+# % 1.3 Discarding observations with labels not validate by humans
+# (Visual inspection of several ECG recordings revealed susicious labels)
+if flag_validated_by_human_only:
+    bool_validated_by_humans = df_ptbxl['validated_by_human']
+    
+    # Filtering
+    df_ptbxl           = df_ptbxl.loc[bool_validated_by_humans, :]
+    df_ptbxl_plus_12sl = df_ptbxl_plus_12sl.loc[bool_validated_by_humans, :]
+    df_ptbxl_plus_unig = df_ptbxl_plus_unig.loc[bool_validated_by_humans, :]
+    y = y[bool_validated_by_humans]
+    
+    del bool_validated_by_humans
+
+# % 1.4 Defining troubleshooting function to extract and plot the raw ECG of an input ECG ID
 def extract_plot_ecg(ecg_id, y, root_path=data_path, flag_plot=True):
     
     # Extraction
-    ecg_filename = y['filename_hr'][ecg_id]
+    ecg_filename = y.loc[ecg_id,'filename_hr']
     ecg_path = root_path + ecg_filename
     ecg_signal = wfdb.rdsamp(ecg_path)
     
@@ -322,8 +338,17 @@ if flag_combine_shared_feats: # Mean-averaging shared feature values if similar 
         #                 Lower-end Uni G values do not appear physiologically realistic when considering typical or pathological P wave duration values.
         #                 No action required, defaulting to the 12SL value corrects for this.
 
-else: # Considering only the 12SL feature values and ignoring the Uni G feature values
-    df_ptbxl_plus[shared_feats] = df_ptbxl_plus_12sl[shared_feats]
+else: # Considering only the feature values from the default_ptbxl_plus featureset
+
+    if default_ptbxl_plus == '12sl':
+        df_ptbxl_plus[shared_feats] = df_ptbxl_plus_12sl[shared_feats]
+        
+    elif default_ptbxl_plus == 'unig':
+        df_ptbxl_plus[shared_feats] = df_ptbxl_plus_12sl[shared_feats]
+
+    else:
+        raise ValueError('Default PTBXL+ dataset for shared features not recognized.')
+
     
 del df_ptbxl_plus_12sl, df_ptbxl_plus_unig, shared_feats, unique_12sl_feats, unique_unig_feats, 
 
@@ -686,11 +711,12 @@ del all_cvd_combs, cvd, cvd_combs_counts, cvd_combs_counts_ord, cvd_comb, cvd_co
 # % 6.2 New feature creation (AV parity)
 
 # Mismatch in atrial and ventricular rates can be indicative of AV node pathologies or atrial/ventricular arrhythmias.
-X['HR_AV_Mismatch_Global'] = abs(X['HR_Atrial_Global'] - X['HR_Ventr_Global']) 
+X['HR_AV_Ratio_Global'] = abs(X['HR_Atrial_Global']/X['HR_Ventr_Global']) 
 
-# % 6.3 Feature Selection
+
+# %% 7. Feature Selection
              
-# 7.3.1 Selecting between all HR-related features
+# 7.1 Selecting between all HR-related features
 # The following features contain heart rate information and are likely strongly intercorrelated:
     # - QRS_Count_Global
     # - RR_Mean_Global
@@ -718,15 +744,32 @@ plt.ylabel('HR Feature')
     # - RR_Mean_Global has a very strong (negative) correlation with HR_Ventr_Global (-0.94) and HR__Global (-0.94).
     #   Expected since, similarly, both essentially convey the same information (heart rate [especially QRS-derived] being inversely proportional to RR interval). 
     #  -> Discard RR_Mean_Global since this is a less "universal" feature than HR_Ventr_Global.
+    # - HR_Sinus_Global has a very strong correlation with HR_Ventr_Global (0.99).
+    #   Expected since in the vast majority of cases the sinus rate will equal the ventricular rate (VT/VFs not really expected in this dataset).
+    #   -> Discard HR_Sinus_Global since its info is already captured by HR_Ventr_Global.
     # - HR__Global has a very strong (negative) correlation with RR_Mean_Global (-0.94) and (positive) correlation with HR_Ventr_Global (1.00).
     #   Expected for same reasons as discussed for RR_Mean_Global.
     #   -> Discard HR__Global since its info is already captured by HR_Ventr_Global.
     
-X.drop(['QRS_Count_Global', 'RR_Mean_Global', 'HR__Global'], 
+X.drop(['QRS_Count_Global', 'RR_Mean_Global', 'HR_Sinus_Global', 'HR__Global'], 
         axis=1, 
         inplace=True)    
 
-# 6.3.2 Selecting between all QT Int features
+# 7.2 Selecting between all HRV features
+# The following features represent different temporal measures of heart rate variability:
+    # - HR_Var_Global
+    # - RR_StdDev_Global
+# Only one temporal HRV measure is necessary. One must be discarded.
+
+# Observations:
+    # - HR_Var_Global is likely RMSSD (since it's a popular temporal HRV metric for such short recordings and it's scale is smaller than RR Std Dev).
+    #   -> Keep HR_Var_Global and dicard HR_StdDevGlobal since its a more "standard" HRV measure.
+
+X.drop(['RR_StdDev_Global'], 
+       axis=1, 
+       inplace=True)
+
+# 7.3 Selecting between all QT Int features
 # The following features all represent different corrections of the QT interval and are likely strongly intercorrelated:
     # - QT_Int_Global
     # - QT_IntBazett_Global
@@ -766,9 +809,14 @@ X.drop(['QT_Int_Global', 'QT_IntBazett_Global', 'QT_IntFridericia_Global', 'QT_I
        axis=1, 
        inplace=True)         
 
-# 6.3.3 Selecting between all VM features
-
-# The following 19 features convey different and highly granular vectorcardiography information:
+# 7.4 Selecting between vectorcardiography (heart axes) features
+# The following features all represent different vectorgardiography features (i.e., heart axes) when considering the average of the ECG waves and some may be intercorrelated:
+    # - P_AxisFront_Global
+    # - R_AxisFront_Global
+    # - QRS_AxisFront_Global
+    # - ST_AxisFront_Global
+    # - T_AxisFront_Global
+# The following features convey represent different highly granular vectorcardiography features when considering maxima of the ECG waves and some may also be intercorrelated:
     # - VM_AngFront_MaxQRS,
     # - VM_AngFront_MaxT,
     # - VM_AngRSag_MaxQRS
@@ -788,11 +836,16 @@ X.drop(['QT_Int_Global', 'QT_IntBazett_Global', 'QT_IntFridericia_Global', 'QT_I
     # - VM_Pos_MaxT,
     # - VM_Vel_MaxQRS,
     # - VM_Vel_MaxT
-# Ideally, we could reduce the number of these granular vectorcardiography features and keep the most general ones.
-
-# VM feature correlations
+# Ideally, we could reduce the number of these vectorcardiography features, which may overlap, and keep the most general ones.
+    
+# Vectorcardiography feature correlations
 plt.figure(figsize=(10, 6))
-sns.heatmap(X.loc[:, ['VM_AngFront_MaxQRS','VM_AngFront_MaxT', 
+sns.heatmap(X.loc[:, ['P_AxisFront_Global', 
+                      'R_AxisFrontal_Global', 
+                      'QRS_AxisFront_Global', 
+                      'ST_AxisFront_Global', 
+                      'T_AxisFront_Global',
+                      'VM_AngFront_MaxQRS','VM_AngFront_MaxT', 
                       'VM_AngRSag_MaxQRS', 'VM_AngRSag_MaxT',
                       'VM_AngTrans_MaxQRS', 'VM_AngTrans_MaxT', 'VM_Ang_QRS-T',
                       'VM_LenFront_MaxQRS', 'VM_LenFront_MaxT', 
@@ -801,24 +854,28 @@ sns.heatmap(X.loc[:, ['VM_AngFront_MaxQRS','VM_AngFront_MaxT',
                       'VM_Mag_MaxQRS', 'VM_Mag_MaxT', 
                       'VM_Pos_MaxQRS', 'VM_Pos_MaxT',
                       'VM_Vel_MaxQRS', 'VM_Vel_MaxT']].corr())
-plt.title('VM Feature Correlations')
-plt.xlabel('VM Feature')
-plt.ylabel('VM Feature')
+plt.title('Vectorcardiography Feature Correlations')
+plt.xlabel('Vectorcardiography Feature')
+plt.ylabel('Vectorcardiography Feature')
 
 # Observations:
+    # - R_AxisFrontal_Global has a strong correlation with QRS_AxisFront_Global (0.89).
+    #   Expected since the R wave is the dominant component of the QRS complex, but the QRS complex captures the entirety of ventricular depolarization (and thus should contain more info).
+    #   -> Discard R_AxisFrontal_Global since its ventricular depolarization info (and more) is already captured in QRS_AxisFront_Global.
     # - The VM_Len... features are highly granular and redundant. 
     #   The projected length of the QRS and T complex/wave onto each cartesian plane can be derived from the angles and the vector magnitude features.
     #   -> Discard features.
-    
-X.drop(['VM_LenFront_MaxQRS', 'VM_LenFront_MaxT', 
+ 
+X.drop(['R_AxisFrontal_Global', 
+        'VM_LenFront_MaxQRS', 'VM_LenFront_MaxT', 
         'VM_LenRSag_MaxQRS', 'VM_LenRSag_MaxT', 
         'VM_LenTrans_MaxQRS', 'VM_LenTrans_MaxT'], 
        axis=1, 
-       inplace=True)    
+       inplace=True)   
     
-# % 6.4 Distributions of selected features grouped by class for pure ECG recordings (prevent confounding distributions)
+# % 7.5 Distributions of selected features grouped by class for pure ECG recordings (prevent overlapping distributions due to CVD coexistance)
 y_pure_labels = y.loc[idxs_pure, 'scp_codes']
-y_pure_labels = y_pure_labels.apply(lambda x: x[0])  # Unpacking from list.
+y_pure_labels = y_pure_labels.apply(lambda x: x[0]) # Unpacking from list.
 
 # Create a dictionary to map classes to colors
 cvd_color_map = dict(zip(all_cvds, all_cvds_colors))
@@ -849,7 +906,40 @@ for col in X.columns:
     plt.tight_layout()
     plt.show()
 
-# % 6.5 Handling numerical features (standardization or normlization)
+del y_pure_labels, col, cvd, color, col_X_pure, cvd_col_X_pure
+
+# % 7.6 Class distribution-based feature selection
+# Plotting box-plots + histograms of each remaining feature grouped by CVD superclass to discard features with no superclass separability
+
+# The following features demonstrated little to no separability of the CVD superclasses:
+    # - P_Dur_Global
+    # - P_AxisFront_Global
+    # - VM_AngRSag_MaxT    
+    # - VM_AngTrans_MaxT
+    # - VM_Pos_MaxT
+# -> Discard features.
+
+X.drop(['P_Dur_Global', 
+        'P_AxisFront_Global', 'VM_AngRSag_MaxT', 
+        'VM_AngTrans_MaxT', 'VM_Pos_MaxT'], 
+       axis=1, 
+       inplace=True)   
+
+
+# %% 8. Visualizing CVD superclass clusters
+
+# % 8.1 Preparing dat
+
+# Extracting pure observations - this analysis is performed on the pure ECG recordings only to simplify the analysis and reduce the effect of overlapping clusters due to CVD coexistence.
+X_pure = X.loc[idxs_pure, :]
+y_pure = y.loc[idxs_pure, :]
+
+# Discarding observations with NaNs in their features
+bool_nan = X_pure.isna().any(axis=1)
+X_pure = X_pure.loc[~bool_nan, :]
+y_pure = y_pure.loc[~bool_nan, :]
+
+# Scaling (standardization or normlization) for cluster visualization.
 # The idea is to first try tree-based models, which are invariant to feature scale.
 # However, for visualization of CVD superclass clustering (e.g., using PCA or ICA), feature ranges must be comparable.
 # All features demonstrated a non-normal distribution, hence standardization is not appropriate.
@@ -859,38 +949,21 @@ for col in X.columns:
 scaler = MinMaxScaler()
 
 # Fit the scaler to the training/val data and transform it 
-X_scaled = pd.DataFrame(scaler.fit_transform(X), index=X.index, columns=X.columns)
+X_pure_scaled = pd.DataFrame(scaler.fit_transform(X_pure), index=X_pure.index, columns=X_pure.columns)
+
+# Removing 'sex' feature - since its a boolean and quite 50/50 split in the data, it will dominate the variance and hence the PC1 loadings
+X_pure_scaled.drop(columns=["sex"], inplace=True)
 
 del scaler
 
-
-# %% 7. Visualizing train/val set class (i.e. CVD superclass clusters)
-# This analysis is performed on train/val set to prevent data leakage from test set.
-
-# Thought:
-# It would be interesting to differentiate the pure ECG recordings (i.e., those with a single CVD superclass) from those with coexisting CVDs.
-# One might expect the pure observations to exist closer to their CVD superclass centroid, and the mixed CVD observations to exist on the boundary regions and overlap with those of the other coexisting CVDs.
-
-# % 7.1 Principal component analysis visualization
-
-# De-mean?
-
-# Isolating pure ECG recordings (single CVD superclass)
-X_scaled_pure = X_scaled.loc[idxs_pure].dropna()  # Drop observations with NaNs
-y_pure = y.loc[X_scaled_pure.index]
-
-# Removing 'sex' feature - since its a boolean and quite 50/50 split in the data, it will dominate the variance and hence the PC1 loadings
-X_scaled_pure.drop(columns=["sex"], inplace=True)
-
-# Assign colormap disctionairy for vizualization
-color_map = {cvd: color for cvd, color in zip(all_cvds, all_cvds_colors)}
+# % 8.2 Principal component analysis visualization
 
 # 3D PCA
 pca = PCA(n_components=3, random_state=rand_state)
-X_scaled_pure_pca = pca.fit_transform(X_scaled_pure)
+X_pure_scaled_pca = pca.fit_transform(X_pure_scaled)
 
 # Extracting and ranking (absolute) loadings
-loadings = pd.DataFrame(abs(pca.components_.T), columns=[f"PC{ii+1}" for ii in range(pca.n_components_)], index=X_scaled_pure.columns)
+loadings = pd.DataFrame(abs(pca.components_.T), columns=[f"PC{ii+1}" for ii in range(pca.n_components_)], index=X_pure_scaled.columns)
 loadings_top_5 = {f"PC{ii+1}": loadings[f"PC{ii+1}"].abs().sort_values(ascending=False).head(5) for ii in range(pca.n_components_)}
 
 # PC top 5 loadings:
@@ -901,11 +974,11 @@ for pc, sorted_features in loadings_top_5.items():
 # Plotting 3D PCA
 fig = plt.figure(figsize=(14, 14))
 ax = fig.add_subplot(111, projection='3d')
-for ii, (ii_cvd, ii_color) in enumerate(color_map.items()):
-    indexes_ii_cvd_pure = [jj for jj, labels in enumerate(y_pure) if labels[0] == ii_cvd]
-    ax.scatter(X_scaled_pure_pca[indexes_ii_cvd_pure, 0], 
-               X_scaled_pure_pca[indexes_ii_cvd_pure, 1], 
-               X_scaled_pure_pca[indexes_ii_cvd_pure, 2],
+for ii, (ii_cvd, ii_color) in enumerate(cvd_color_map.items()):
+    indexes_ii_cvd_pure = [jj for jj, labels in enumerate(y_pure['scp_codes']) if labels[0] == ii_cvd]
+    ax.scatter(X_pure_scaled_pca[indexes_ii_cvd_pure, 0], 
+               X_pure_scaled_pca[indexes_ii_cvd_pure, 1], 
+               X_pure_scaled_pca[indexes_ii_cvd_pure, 2],
                c=ii_color, label=ii_cvd, alpha=0.4, marker='.')
 
 ax.set_title("3D PCA Visualization of Pure ECG Recordings", fontsize=14)
@@ -917,25 +990,25 @@ plt.show()
 
 # Observations:
     # Not super clearly separable classes or distinct clusters:
-        # - Large NORM cloud spanning most of the PC observation space.
-        # - STTC and MI clouds can be somewhat discerned but with significant NORM contamination.
-        # - CD and HYP seem to be distributed throughout the NORM cloud.
-    # Variance does not seem to be a great separator of CVD superclasses.  
+        # - Large NORM cloud spanning most of the PC observation space and more dense towards its center.
+        # - STTC, MI and CD clouds can be somewhat discerned towards the edges of the NORM cloud but with significant NORM contamination.
+        # - HYP is harder to discern tue to its low frequency.
+    # Variance does not seem to be a fantastic separator of CVD superclasses.  
     
-del idxs_pure, pca, X_scaled_pure_pca, pc, sorted_features, loadings, loadings_top_5, fig, ax, ii, ii_cvd, ii_color, indexes_ii_cvd_pure    
+del pca, X_pure_scaled_pca, pc, sorted_features, loadings, loadings_top_5, fig, ax, ii, ii_cvd, ii_color, indexes_ii_cvd_pure    
 
-# % 7.2 Independant component analysis visualization
+# % 8.3 Independant component analysis visualization
 ica = FastICA(n_components=3, random_state=rand_state, max_iter=1000)
-X_scaled_pure_ica = ica.fit_transform(X_scaled_pure)
+X_pure_scaled_ica = ica.fit_transform(X_pure_scaled)
     
 # Plotting 3D ICA
 fig = plt.figure(figsize=(14, 14))
 ax = fig.add_subplot(111, projection='3d')
-for ii, (ii_cvd, ii_color) in enumerate(color_map.items()):
-    indexes_ii_cvd_pure = [jj for jj, labels in enumerate(y_pure) if labels[0] == ii_cvd]
-    ax.scatter(X_scaled_pure_ica[indexes_ii_cvd_pure, 0], 
-               X_scaled_pure_ica[indexes_ii_cvd_pure, 1], 
-               X_scaled_pure_ica[indexes_ii_cvd_pure, 2],
+for ii, (ii_cvd, ii_color) in enumerate(cvd_color_map.items()):
+    indexes_ii_cvd_pure = [jj for jj, labels in enumerate(y_pure['scp_codes']) if labels[0] == ii_cvd]
+    ax.scatter(X_pure_scaled_ica[indexes_ii_cvd_pure, 0], 
+               X_pure_scaled_ica[indexes_ii_cvd_pure, 1], 
+               X_pure_scaled_ica[indexes_ii_cvd_pure, 2],
                c=ii_color, label=ii_cvd, alpha=0.4, marker='.')
 
 ax.set_title("3D ICA Visualization of Pure ECG Recordings", fontsize=14)
@@ -945,28 +1018,28 @@ ax.set_zlabel("IC 3")
 ax.legend(title="CVD Superclass", loc='upper right', fontsize=10)
 plt.show()
 
-del ica, X_scaled_pure_ica, fig, ax, ii, ii_cvd, ii_color, indexes_ii_cvd_pure
+del ica, X_pure_scaled_ica, fig, ax, ii, ii_cvd, ii_color, indexes_ii_cvd_pure
     
 # Observations:
-    # Slightly more separable classes than PCA but still no distinct clusters:
+    # Slightly more separable classes than PCA:
         # Cloud of NORM observations has region that is distinct and somewhat compact, but a few NORM observations exist beyond it.
-        # MI and STTC clouds exist mixed together in two main regions above and below the NORM cloud.
+        # More distinct and separated MI and STTC clouds in two separate regions  beyond the NORM cloud.
         # CD cloud permeates the entire mass and exists somewhat alone to the left of the NORM cloud.
     # Statistical independence seems a better separator of CVD superclasses than variance (as in PCA).
     # Perhahps non-linear methods (e.g., tSNE) will better separate the classes.
     
-# % 7.3 tSNE visualization
-tsne = TSNE(n_components=3, random_state=rand_state, perplexity=30, n_iter=1000, n_jobs=-1)
-X_scaled_pure_tsne = tsne.fit_transform(X_scaled_pure)
+# % 8.4 tSNE visualization
+tsne = TSNE(n_components=3, random_state=rand_state, perplexity=50, n_iter=1000, n_jobs=-1)
+X_pure_scaled_tsne = tsne.fit_transform(X_pure_scaled)
 
 # Plotting 3D t-SNE
 fig = plt.figure(figsize=(14, 14))
 ax = fig.add_subplot(111, projection='3d')
-for ii, (ii_cvd, ii_color) in enumerate(color_map.items()):
-    indexes_ii_cvd_pure = [jj for jj, labels in enumerate(y_pure) if labels[0] == ii_cvd]
-    ax.scatter(X_scaled_pure_tsne[indexes_ii_cvd_pure, 0], 
-               X_scaled_pure_tsne[indexes_ii_cvd_pure, 1], 
-               X_scaled_pure_tsne[indexes_ii_cvd_pure, 2],
+for ii, (ii_cvd, ii_color) in enumerate(cvd_color_map.items()):
+    indexes_ii_cvd_pure = [jj for jj, labels in enumerate(y_pure['scp_codes']) if labels[0] == ii_cvd]
+    ax.scatter(X_pure_scaled_tsne[indexes_ii_cvd_pure, 0], 
+               X_pure_scaled_tsne[indexes_ii_cvd_pure, 1], 
+               X_pure_scaled_tsne[indexes_ii_cvd_pure, 2],
                c=ii_color, label=ii_cvd, alpha=0.4, marker='.')
 
 ax.set_title("3D t-SNE Visualization of Pure ECG Recordings", fontsize=14)
@@ -976,19 +1049,52 @@ ax.set_zlabel("t-SNE 3")
 ax.legend(title="CVD Superclass", loc='upper right', fontsize=10)
 plt.show()
 
-del tsne, X_scaled_pure_tsne, fig, ax, ii, (ii_cvd, ii_color), indexes_ii_cvd_pure
+del tsne, X_pure_scaled_tsne, fig, ax, ii, (ii_cvd, ii_color), indexes_ii_cvd_pure
 
-# The fact that CVD superclasses were not clearly separable into distinct clusters, even when using pure-label observations suggests that the mixed-label observations would be even harder to distinguish.
+# Observations:
+    # - CVD superclasses are still not clearly separable into distinct non-overlapping clusters.
+    # - There is a dense NORM cloud that spreads out covering the entire populated space.
+    # - There are several somewhat clearer clusters (wrt PCA and ICA) of MI, STTC and CD of various sizes and spread all around the edges of the NORM cloud but with significant inter-class contamination.
 
 
-# %% 9. Saving relevant outputs
+# %% 9. Main Conclusions and Suggestions
+# - Overall, no clear separability of CVD superclass clusters. 
+#   NORM exists a large cloud with a denser center than edges but that spreads throughout the entire populated space PC/IC/tSNE spaces.   
+# - MI, STTC, CD and HYP exist as small dispersed clusters EACH, with varying shapes.
+#   This is likely due to various different types of CVDs belonging to each CVD superclass (e.g., LBBB and arrhythmia are very different types of CD).
+# - There is significant contamination between the CVD superclass clusters.
+# - A classification scheme considering this data would benefit from non-linear or non-distance-based models (e.g. Gradient Boosted Trees).
+# - Dataset refactoring: An increased number of classes, with more granularity, could be beneficial to split separate subclusters of a single CVD superclass into several CVD classes that are more localized in the feature space. 
+#                        Closer inspection of some pure ECG recordings signals also some suspicious labels (e.g., ECG recordings with obvious AFib being labelled as STTC). 
+# - Sex was removed for visualization purposes, age was left in. 
+#   Perhaps Sex/age cohort specific clustering would make more sense, especially for visualization purposes, to separate the CVD superclasses. 
+#   (some feature values might only correspond to specific CVD superclasses depending on sex/age).
+
+
+# %% 10. Saving relevant outputs and processing parameters
 if flag_save:
-    X.to_csv(os.path.join(os.getcwd(), 'X.csv'))
-    y.to_csv(os.path.join(os.getcwd(), 'y.csv'))
+    
+    save_path = os.getcwd()
+    
+    # Outputs
+    X.to_csv(os.path.join(save_path, 'X.csv'), index=True)
+    y.to_csv(os.path.join(save_path, 'y.csv'), index=True)
+    
+    # Parameters (for reproducibility)
+    params = pd.DataFrame({'rand_state': [rand_state],
+                           'flag_save': [flag_save],
+                           'flag_validated_by_human_only': [flag_validated_by_human_only],
+                           'flag_combine_shared_feats': [flag_combine_shared_feats]})
+    params.to_csv(os.path.join(save_path, 'params.csv'), index=False)
+   
+    print(f"Saved outputs and params to {save_path}")
 
 
-# %% 10. Troubleshooting
+# %% 11. Troubleshooting
 
 # Displaying specific ECGs
-ecg_id_troublshoot = 1012
-extract_plot_ecg(ecg_id_troublshoot, y, data_path+'PTBXL/', True)
+bool_inspect_ECGs = (X_pure['LVH_Strain_Global'] == 1)
+ecg_id_troublshoot = X_pure.loc[bool_inspect_ECGs, :].index
+
+for ecg_id in ecg_id_troublshoot:
+    extract_plot_ecg(ecg_id, y, data_path+'PTBXL/', True)
