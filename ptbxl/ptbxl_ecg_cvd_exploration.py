@@ -1,4 +1,6 @@
-# Script for the exploration and analysis of the PTBXL and PTBXL+ ECG database.
+# %%  Script for the exploration and analysis of the PTBXL and PTBXL+ ECG database.
+
+# Dataset Description:
 # The database consists of some approx. 22,000 12-lead ECG recordings corresponding to 19,000 patients and labelled with one or more cardiovascular disease superclasses:
     # - NORM (normal) - Normal ECG recordings without any detectable cardiovascular abnormalities.
     # - MI (myocardial infarction) - Various forms of heart attack, characterized by ischemic changes in the ECG, 
@@ -11,17 +13,23 @@
     # - HYP (hypertrophy)] - Enlargement or thickening of the heart muscle (particularly the ventricle(s)).
 # Not all of the CVD superclass labels in the dataset were validated by humans: approx. 6,000 of the ECG recordings were not human-validated.
 # The prevalence of coexisting CVD superclasses in individual ECG recordings is significant and reflects the reality of CVDs (i.e., comorbidities).
+
+# Script Outline:
 # This script loads the PTBXL database (patient demographic, recording, and label information), 
 # as well as the PTBXL+ database (extracted ECG features from the PTBXL database using public ECG analysis libraries).
 # Features of these databases are selected, engineering and analyzed for their further use in a Machine-Learning-based classification framework.
-# The following analysis are performed here:
-    # 1. Preliminary feature selection.
-    # 2. Combination of PTBXL+ features common to GE Healthcare 12SL and University of Glasgow featuresets.
-    # 3. Feature exploration and wrangling.
-    # 4. Target CVD superclass exploration and wrangling.
-    # 5. Feature engineering
-    # 6. Visualization of CVD superclass clustering.
-    # 7. Saving outputs for further ML classification framework.
+# This script consists of the following sections:
+    # 1. Loading of Datasets
+    # 2. Preliminary feature selection.
+    # 3. Combination of PTBXL+ features common to GE Healthcare 12SL and University of Glasgow featuresets.
+    # 4. Feature exploration and wrangling.
+    # 5. Target CVD superclass exploration and wrangling.
+    # 6. Feature engineering
+    # 7. Feature Selection
+    # 8. Visualization of CVD superclass clustering.
+    # 9. Main Conclusions and suggestions.
+    # 10. Saving outputs for further ML classification framework.
+    # 11. Troubleshooting section.
 
 # Rafael Cordero, December 2024.
 
@@ -486,7 +494,7 @@ for col in X.columns:
         #                        - invalid ECG recording for LVH strain assesment [likely class -3276].
         #                       -> set -3276 values to NaN.              
             
-del  col, col_sw_stat, col_p, col_normality  
+del df_feature_SW_normalities, col, col_sw_stat, col_p, col_normality  
            
 # % 4.4 Correcting features and discarding/NaNing unrealistic outliers
 
@@ -606,12 +614,12 @@ all_pure_cvds_counts = pd.DataFrame(data = [[0, 0, 0, 0, 0]], # Initialization o
                                     columns= all_cvds)
 
 # Identifying pure ECG recordings (single CVD superclass)
-idxs_pure = [idx for idx, labels in y['scp_codes'].items() if len(labels) == 1]
+pure_ecg_ids = y.index[y['scp_codes'].apply(len) == 1].tolist()
 
-# Going through each target CVD superclass label and counting occurence of each CVD superclass
-for ii in y.loc[idxs_pure, :].index:
+# Going through each target CVD superclass label and counting occurrence of each CVD superclass
+for ii in y.loc[pure_ecg_ids, :].index:
     for cvd in all_cvds:
-        if cvd in y.loc[idxs_pure, 'scp_codes'][ii]:
+        if cvd in y.loc[pure_ecg_ids, 'scp_codes'][ii]:
             all_pure_cvds_counts[cvd] += 1
     
 # Plotting pie chart of total counts of each target CVD superclass in pure EXG recordings only
@@ -874,7 +882,7 @@ X.drop(['R_AxisFrontal_Global',
        inplace=True)   
     
 # % 7.5 Distributions of selected features grouped by class for pure ECG recordings (prevent overlapping distributions due to CVD coexistance)
-y_pure_labels = y.loc[idxs_pure, 'scp_codes']
+y_pure_labels = y.loc[pure_ecg_ids, 'scp_codes']
 y_pure_labels = y_pure_labels.apply(lambda x: x[0]) # Unpacking from list.
 
 # Create a dictionary to map classes to colors
@@ -884,7 +892,7 @@ for col in X.columns:
     plt.figure(figsize=(12, 6))
     
     # Extracting current feature values of pure ECG recordings
-    col_X_pure = X.loc[idxs_pure, col]
+    col_X_pure = X.loc[pure_ecg_ids, col]
 
     # Left subplot: Boxplots
     plt.subplot(1, 2, 1)
@@ -931,8 +939,8 @@ X.drop(['P_Dur_Global',
 # % 8.1 Preparing dat
 
 # Extracting pure observations - this analysis is performed on the pure ECG recordings only to simplify the analysis and reduce the effect of overlapping clusters due to CVD coexistence.
-X_pure = X.loc[idxs_pure, :]
-y_pure = y.loc[idxs_pure, :]
+X_pure = X.loc[pure_ecg_ids, :]
+y_pure = y.loc[pure_ecg_ids, :]
 
 # Discarding observations with NaNs in their features
 bool_nan = X_pure.isna().any(axis=1)
@@ -954,7 +962,7 @@ X_pure_scaled = pd.DataFrame(scaler.fit_transform(X_pure), index=X_pure.index, c
 # Removing 'sex' feature - since its a boolean and quite 50/50 split in the data, it will dominate the variance and hence the PC1 loadings
 X_pure_scaled.drop(columns=["sex"], inplace=True)
 
-del scaler
+del bool_nan, scaler
 
 # % 8.2 Principal component analysis visualization
 
@@ -1058,23 +1066,26 @@ del tsne, X_pure_scaled_tsne, fig, ax, ii, (ii_cvd, ii_color), indexes_ii_cvd_pu
 
 
 # %% 9. Main Conclusions and Suggestions
-# - Overall, no clear separability of CVD superclass clusters. 
+# - Overall, no clear separability of CVD superclass clusters of pure ECG recordings (i.e., single CVD superclass label). 
 #   NORM exists a large cloud with a denser center than edges but that spreads throughout the entire populated space PC/IC/tSNE spaces.   
 # - MI, STTC, CD and HYP exist as small dispersed clusters EACH, with varying shapes.
 #   This is likely due to various different types of CVDs belonging to each CVD superclass (e.g., LBBB and arrhythmia are very different types of CD).
 # - There is significant contamination between the CVD superclass clusters.
-# - A classification scheme considering this data would benefit from non-linear or non-distance-based models (e.g. Gradient Boosted Trees).
-# - Dataset refactoring: An increased number of classes, with more granularity, could be beneficial to split separate subclusters of a single CVD superclass into several CVD classes that are more localized in the feature space. 
-#                        Closer inspection of some pure ECG recordings signals also some suspicious labels (e.g., ECG recordings with obvious AFib being labelled as STTC). 
+#   This dataset (and its featureset) is clearly not perfect and any models trained on it, even if they achieve good performances, should be used with caution.
 # - Sex was removed for visualization purposes, age was left in. 
 #   Perhaps Sex/age cohort specific clustering would make more sense, especially for visualization purposes, to separate the CVD superclasses. 
 #   (some feature values might only correspond to specific CVD superclasses depending on sex/age).
+# - A classification scheme considering this data would benefit from non-linear or non-distance-based models (e.g. Gradient Boosted Trees).
+#   However, high performances are a priori not expected (even if considering only pure ECG recordings).
+# - Dataset refactoring: - An increased number of classes, with more granularity, could be beneficial to split separate subclusters of a single CVD superclass into several CVD classes that are more localized in the feature space. 
+#                        - Closer inspection of some pure ECG recordings signals revealed some suspicious labels (e.g., ECG recordings with obvious AFib being labelled as STTC). 
+#                        - Closer inspection of some PTBXL+ feature values also revealed some suspicious values (e.g., very high HR_AV_Ratio in subjects with no observable tachyarrhitmia in their ECG recorddings). 
 
 
 # %% 10. Saving relevant outputs and processing parameters
 if flag_save:
     
-    save_path = os.getcwd()
+    save_path = 'C:/Users/rcord/OneDrive/Documentos/GitHub/python-ml-portfolio/ptbxl/'
     
     # Outputs
     X.to_csv(os.path.join(save_path, 'X.csv'), index=True)
