@@ -67,7 +67,7 @@ default_ptbxl_plus = '12sl' # The PTBXL+ featureset considered for the shared fe
 # % 1.1 Loading PTBXL and PTBXL+ Datasets
 
 # Define public dataset path.
-data_path = 'C:/Users/rcord/OneDrive/Documentos/Data/Public/'
+data_path = 'C:/Users/Rafael/OneDrive/Documents/Data/Public/'
 
 # Load both PTBXL and PTBXL+ (12SL + Uni G)
 df_ptbxl           = pd.read_csv(data_path + 'PTBXL/ptbxl_database.csv', index_col='ecg_id') # Download from https://physionet.org/content/ptb-xl/1.0.3/
@@ -1085,7 +1085,7 @@ del tsne, X_pure_scaled_tsne, fig, ax, ii, (ii_cvd, ii_color), indexes_ii_cvd_pu
 # %% 10. Saving relevant outputs and processing parameters
 if flag_save:
     
-    save_path = 'C:/Users/rcord/OneDrive/Documentos/GitHub/python-ml-portfolio/ptbxl/'
+    save_path = 'C:/Users/Rafael/Documents/GitHub/python-ml-portfolio/ptbxl/'
     
     # Outputs
     X.to_csv(os.path.join(save_path, 'X.csv'), index=True)
