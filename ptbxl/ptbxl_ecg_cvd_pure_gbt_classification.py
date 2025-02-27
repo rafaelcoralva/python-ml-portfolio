@@ -34,7 +34,7 @@
     # 1. Loading processed featureset and labels.
     # 2. Splitting into training/validation and test sets.
     # 3. Grid search cross-validation.
-    # 4. Optimal model training.
+    # 4. Optimal model extraction.
     # 5. Evaluation.
     # 6. Conclusions.
     
@@ -54,8 +54,10 @@ import collections as colls
 import seaborn as sns
 import matplotlib.pyplot as plt
 
+from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import PredefinedSplit, GridSearchCV
-from sklearn.metrics import f1_score, make_scorer
+from sklearn.metrics import f1_score, make_scorer, confusion_matrix, classification_report  
+
 from sklearn.utils.class_weight import compute_sample_weight
 from lightgbm import LGBMClassifier
 
@@ -73,8 +75,9 @@ prj_path = 'C:/Users/Rafael/Documents/GitHub/python-ml-portfolio/ptbxl/'
 
 # Load X, y, and params
 X = pd.read_csv(prj_path + 'X.csv', index_col='ecg_id') # Obtained via ptbxl_ecg_cvd_exploration.py.
+
 y = pd.read_csv(prj_path + 'y.csv', index_col='ecg_id')
-y['scp_codes'] = y['scp_codes'].apply(ast.literal_eval) # Converting labels to lists, rather than strings bookended with '[]'.
+y['scp_codes'] = y['scp_codes'].apply(ast.literal_eval) # Convert labels from string representation of lists to actual lists
 
 proc_params = pd.read_csv(prj_path + 'params.csv')
 
@@ -83,7 +86,11 @@ pure_ecg_ids = y.index[y['scp_codes'].apply(len) == 1].tolist()
 
 X = X.loc[pure_ecg_ids, :]
 y = y.loc[pure_ecg_ids, :]
-y['scp_codes'] = y['scp_codes'].apply(lambda x: x[0]) # Converting labels to strings
+
+# % 1.3 Processing labels
+y['scp_codes'] = y['scp_codes'].apply(lambda x: x[0]) # Extract the first element of each list (assuming each list has only one label)
+label_encoder = LabelEncoder() # Encode the string labels as integers
+y['scp_codes_int'] = label_encoder.fit_transform(y['scp_codes'])
 
 del pure_ecg_ids
 
@@ -91,7 +98,7 @@ del pure_ecg_ids
 # %% 2. Splitting into training/validation and test sets
  
 bool_tr = y['strat_fold'] < 9 # Includes validation set because cross-validation will be implemented.
-bool_test = y['strat_fold'] < 9
+bool_test = y['strat_fold'] > 9
 
 X_tr = X.loc[bool_tr, :]
 X_test = X.loc[bool_test, :]
@@ -111,13 +118,16 @@ strat_folds = PredefinedSplit(test_fold = y_tr['strat_fold'] - 1)  # -1 is to co
 lgbm = LGBMClassifier(random_state=rand_state, class_weight='balanced')
 
 # Define hyperparameter optimization grid
-param_grid = {'boosting_type': ['gbdt', 'dart'],
-              'max_depth': [3, 5, 7],
-              'learning_rate': [0.01, 0.1, 0.2],
-              'n_estimators': [50, 100, 200]}
+param_grid = {'boosting_type': ['gbdt'],
+              'max_depth': [3, 5], # Shallow trees
+              'learning_rate': [0.01, 0.05, 0.1], # Low learning rates
+              'n_estimators': [50, 100, 200],
+              'reg_lambda': [0, 0.1, 0.5], # L2 regularization
+              'subsample': [0.8, 1.0], # Stochastic gradient boosting
+              'min_child_samples': [10, 20]} # Minimum samples per leaf
 
 # Define F1 scorer as CV-guiding metric
-scorer = make_scorer(f1_score, average='weighted', labels = y_tr['scp_codes'].unique())
+scorer = make_scorer(f1_score, average='weighted', labels = y_tr['scp_codes_int'].unique())
 
 # Set up GridSearchCV
 grid_search = GridSearchCV(estimator = lgbm,
@@ -129,4 +139,34 @@ grid_search = GridSearchCV(estimator = lgbm,
                            refit=True) # Refits model using entire training dataset considering best parameters.
 
 # Perform grid search
-grid_search.fit(X_tr, y_tr['scp_codes'])
+grid_search.fit(X_tr, y_tr['scp_codes_int'])
+                
+
+# %% 4. Optimal Model Extraction
+print(f'Best model parameters: {grid_search.best_params_}')
+print(f'Best model average cross-validation performance (weighted F1): {grid_search.best_score_:.2f}')
+mdl = grid_search.best_estimator_
+
+
+# %% 5. Evaluation on Train and Test Sets
+
+# Train
+y_pred_tr = mdl.predict(X_tr)
+
+conf_mat_tr = confusion_matrix(y_tr['scp_codes_int'], y_pred_tr)
+f1_tr = f1_score(y_tr['scp_codes_int'], y_pred_tr, average='weighted')
+print(f'Best model train/val set performance (weighted F1): {f1_tr:.2f}')
+
+print("Train Set Classification Report:")
+print(classification_report(y_tr['scp_codes_int'], y_pred_tr))
+
+# Test
+y_pred_test = mdl.predict(X_test)
+
+conf_mat_test = confusion_matrix(y_test['scp_codes_int'], y_pred_test)
+f1_test = f1_score(y_test['scp_codes_int'], y_pred_test, average='weighted')
+print(f'Best model test set performance (weighted F1): {f1_test:.2f}')
+
+print("Test Set Classification Report:")
+print(classification_report(y_test['scp_codes_int'], y_pred_test))
+
